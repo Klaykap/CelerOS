@@ -26,8 +26,8 @@ void wait(uint32_t miliseconds);
 #define PACKET_IN 0x69
 #define PACKET_OUT 0xE1
 #define PACKET_SETUP 0x2D
-#define PACKET_DATA0 0xC3
-#define PACKET_DATA1 0x4B
+#define PACKET_SOF 0xA5
+#define PACKET_ACK 0xD2
 #define CONF_ENDPOINT 0
 #define DATA_TOGGLE_0 0
 #define DATA_TOGGLE_1 1
@@ -114,7 +114,7 @@ void uhci_stop(uint32_t usb) {
 }
 
 void uhci_run(uint32_t usb) {
-	write_uhci_cmd(usb, (read_uhci_cmd(usb) | 0x0041));
+	write_uhci_cmd(usb, (read_uhci_cmd(usb) | 0x0081));
 }
 
 void uhci_clear_irq(uint32_t usb) {
@@ -137,6 +137,11 @@ void uhci_switch_off_port(uint32_t usb) {
 	write_uhci_sc1(usb, 0);
 }
 
+void uhci_write_td(uint32_t usb, uint32_t td) {
+	p("TD:");
+	ph(uhci_td[usb][td][1]);
+}
+
 void uhci_debug(uint32_t usb) {
 	ph(read_uhci_cmd(usb));
 	ph(read_uhci_sts(usb));
@@ -153,6 +158,7 @@ void uhci_reset(uint32_t usb) {
 
 	if(usb_ports[usb].base==0) {
 		p("This isnt UHCI port");
+		return;
 	}
 
 	//clear uhci memory
@@ -182,9 +188,10 @@ void uhci_reset(uint32_t usb) {
 	pci_write(usb_ports[usb].bus, usb_ports[usb].dev, usb_ports[usb].func, 0x04, (pci_get_command(usb_ports[usb].bus, usb_ports[usb].dev, usb_ports[usb].func) | 5) );
 
 	//reset uhci
-	write_uhci_cmd(usb, (read_uhci_cmd(usb) | 0x0004));
+	//write_uhci_cmd(usb, (read_uhci_cmd(usb) | 0x0004));
+	write_uhci_cmd(usb, 0x0004);
 	wait(100);
-	write_uhci_cmd(usb, (read_uhci_cmd(usb) | 0xFFFB));
+	write_uhci_cmd(usb, (read_uhci_cmd(usb) & 0xFFFB));
 
 	//disabling uhci legacy support
 	pci_write(usb_ports[usb].bus, usb_ports[usb].dev, usb_ports[usb].func, 0xC0, 0x8F00);
@@ -197,7 +204,7 @@ void uhci_reset(uint32_t usb) {
 
 	//setting base things
 	write_uhci_sofmod(usb, 0x40);
-	write_uhci_frame_addr(usb, ((uint32_t)uhci_frame_mem + (usb * 4096)) );
+	write_uhci_frame_addr(usb, ((uint32_t)&uhci_frame_mem[usb]) );
 	write_uhci_frame_num(usb, 0);
 
 	//reset first port
@@ -207,7 +214,6 @@ void uhci_reset(uint32_t usb) {
 	wait(100);
 
 	//get speed
-	ph(read_uhci_sc1(usb));
 	if( (read_uhci_sc1(usb) & 0x0100) == 0) {
 		usb_ports[usb].speed=FULL_SPEED;
 		p("FULL SPEED PORT");
@@ -218,7 +224,7 @@ void uhci_reset(uint32_t usb) {
 	}
 
 	//enable first port
-	write_uhci_sc1(usb, 0x040E);
+	write_uhci_sc1(usb, 0x000E);
 
 	//enable interrupts
     uhci_enable_interrupts(usb);
@@ -234,22 +240,23 @@ void uhci_reset(uint32_t usb) {
 	}
 	else {
 		p("ERROR! UHCI ports arent enabled!");
+		uhci_debug(usb);
 	}
 
 	//stop uhci
 	uhci_stop(usb);
 }
 
-void uhci_make_td(uint32_t usb, uint32_t td, uint32_t pointer, uint32_t status, uint32_t type, uint32_t endpoint, uint32_t data_toggle, uint32_t device, uint32_t lenght, uint32_t address) {
+void uhci_make_td(uint32_t usb, uint32_t td, uint32_t pointer, uint32_t type, uint32_t endpoint, uint32_t data_toggle, uint32_t device, uint32_t lenght, uint32_t address) {
 	uhci_td[usb][td][0]=pointer;
-	uhci_td[usb][td][1]=(status | 0x00800000);
+	if(usb_ports[usb].speed==FULL_SPEED) {
+		uhci_td[usb][td][1]=0x00800000;
+	}
+	else if(usb_ports[usb].speed==LOW_SPEED) {
+		uhci_td[usb][td][1]=0x04800000;
+	}
 	uhci_td[usb][td][2]=(type | (endpoint << 15) | (lenght << 21) | (data_toggle << 19) | (device << 8));
 	uhci_td[usb][td][3]=address;
-}
-
-void uhci_write_td(uint32_t usb, uint32_t td) {
-	p("TD:");
-	ph(uhci_td[usb][td][1]);
 }
 
 void uhci_pool(uint32_t usb, uint32_t td) {
@@ -259,8 +266,7 @@ void uhci_pool(uint32_t usb, uint32_t td) {
 		if( (uhci_td[usb][td][1] & 0x00800000)==0 ) {
 			return;
 		}
-		ph(uhci_td[usb][td][1]);
-		if(handler_for_pit>200) {
+		if(handler_for_pit>2000) {
 			p("Something wrong with UHCI TD transfer");
 			return;
 		}
@@ -270,45 +276,24 @@ void uhci_pool(uint32_t usb, uint32_t td) {
 void uhci_packet_set_address(uint32_t usb) {
 	uhci_stop(usb);
 
-	uhci_frame_mem[usb][0]=MEM_TD(usb, 0);
+	uhci_frame_mem[usb][0]=MEM_TD(usb, 20);
 
 	uhci_packet[usb][0]=0x00010500;
 	uhci_packet[usb][1]=0x00000000;
 
-	if(usb_ports[usb].speed==LOW_SPEED) {
+	uhci_make_td(usb, 20, MEM_TD(usb, 21), PACKET_SETUP, CONF_ENDPOINT, DATA_TOGGLE_0, ZERO_DEVICE, LOW_SPEED_LENGHT, MEM_PACKET(usb, 0));
 
-	uhci_make_td(usb, 0, MEM_TD(usb, 1), STS_LOW_SPEED, PACKET_SETUP, CONF_ENDPOINT, DATA_TOGGLE_0, ZERO_DEVICE, LOW_SPEED_LENGHT, MEM_PACKET(usb, 0));
-	uhci_make_td(usb, 1, MEM_TD(usb, 2), STS_LOW_SPEED, PACKET_DATA0, CONF_ENDPOINT, DATA_TOGGLE_0, ZERO_DEVICE, LOW_SPEED_LENGHT, MEM_PACKET(usb, 0));
-
-	uhci_make_td(usb, 2, MEM_TD(usb, 3), STS_LOW_SPEED, PACKET_IN, CONF_ENDPOINT, DATA_TOGGLE_1, ZERO_DEVICE, 0xFFF, MEM_PACKET(usb, 0));
-	uhci_make_td(usb, 3, END_TD, STS_LOW_SPEED, PACKET_DATA1, CONF_ENDPOINT, DATA_TOGGLE_1, ZERO_DEVICE, 0xFFF, MEM_PACKET
-(usb, 0));
-
-	}
-
-	if(usb_ports[usb].speed==FULL_SPEED) {
-
-	uhci_make_td(usb, 0, MEM_TD(usb, 1), 0, PACKET_SETUP, CONF_ENDPOINT, DATA_TOGGLE_0, ZERO_DEVICE, FULL_SPEED_LENGHT, MEM_PACKET(usb, 0));
-	uhci_make_td(usb, 1, MEM_TD(usb, 2), 0, PACKET_DATA0, CONF_ENDPOINT, DATA_TOGGLE_0, ZERO_DEVICE, FULL_SPEED_LENGHT, MEM_PACKET(usb, 0));
-
-	uhci_make_td(usb, 2, MEM_TD(usb, 3), 0, PACKET_IN, CONF_ENDPOINT, DATA_TOGGLE_1, ZERO_DEVICE, 0xFFF, MEM_PACKET(usb, 0));
-	uhci_make_td(usb, 3, END_TD, 0, PACKET_DATA1, CONF_ENDPOINT, DATA_TOGGLE_1, ZERO_DEVICE, 0xFFF, MEM_PACKET
-(usb, 0));
-
-	}
+	//uhci_make_td(usb, 21, END_TD, PACKET_IN, CONF_ENDPOINT, DATA_TOGGLE_1, ZERO_DEVICE, LOW_SPEED_LENGHT, MEM_PACKET(usb, 0));
 
 	write_uhci_frame_num(usb, 0);
+
 	uhci_run(usb);
-
-	uhci_pool(usb, 3);
-
+	uhci_pool(usb, 21);
 	uhci_stop(usb);
 
-	for(int i=0; i<3; i++) {
-		uhci_write_td(usb, i);
-	}
+	uhci_write_td(usb, 0);
 
-	for(int i=0; i<13; i++) {
+	for(int i=0; i<2; i++) {
 		ph(uhci_packet[usb][i]);
 	}
 
@@ -323,38 +308,36 @@ void uhci_packet_get_configuration(uint32_t usb) {
 
 	uhci_stop(usb);
 
-	uhci_frame_mem[usb][1]=MEM_TD(usb, 0);
+	uhci_frame_mem[usb][1]=MEM_TD(usb, 1);
 
 	uhci_packet[usb][0]=0x02000680;
 	uhci_packet[usb][1]=0x002E0000;
 
-	uhci_make_td(usb, 0, MEM_TD(usb, 1), STS_LOW_SPEED, PACKET_SETUP, CONF_ENDPOINT, DATA_TOGGLE_0, ZERO_DEVICE, LOW_SPEED_LENGHT, MEM_PACKET(usb, 0));
-	uhci_make_td(usb, 1, MEM_TD(usb, 2), STS_LOW_SPEED, PACKET_DATA0, CONF_ENDPOINT, DATA_TOGGLE_0, ZERO_DEVICE, LOW_SPEED_LENGHT, MEM_PACKET(usb, 0));
+	//uhci_make_td(usb, 0, MEM_TD(usb, 1), PACKET_SOF, CONF_ENDPOINT, DATA_TOGGLE_0, ZERO_DEVICE, LOW_SPEED_LENGHT, MEM_PACKET(usb, 0));
 
-	uhci_make_td(usb, 2, MEM_TD(usb, 3), STS_LOW_SPEED, PACKET_IN, CONF_ENDPOINT, DATA_TOGGLE_1, ZERO_DEVICE, LOW_SPEED_LENGHT, MEM_PACKET(usb, 3));
-	uhci_make_td(usb, 3, MEM_TD(usb, 4), STS_LOW_SPEED, PACKET_DATA1, CONF_ENDPOINT, DATA_TOGGLE_1, ZERO_DEVICE, LOW_SPEED_LENGHT, MEM_PACKET(usb, 3));
+	uhci_make_td(usb, 1, MEM_TD(usb, 2), PACKET_SETUP, CONF_ENDPOINT, DATA_TOGGLE_0, ZERO_DEVICE, LOW_SPEED_LENGHT, MEM_PACKET(usb, 0));
 
-	uhci_make_td(usb, 4, MEM_TD(usb, 5), STS_LOW_SPEED, PACKET_IN, CONF_ENDPOINT, DATA_TOGGLE_0, ZERO_DEVICE, LOW_SPEED_LENGHT, MEM_PACKET(usb, 5));
-	uhci_make_td(usb, 5, MEM_TD(usb, 6), STS_LOW_SPEED, PACKET_DATA0, CONF_ENDPOINT, DATA_TOGGLE_0, ZERO_DEVICE, LOW_SPEED_LENGHT, MEM_PACKET(usb, 5));
+	uhci_make_td(usb, 2, MEM_TD(usb, 3), PACKET_IN, CONF_ENDPOINT, DATA_TOGGLE_1, ZERO_DEVICE, LOW_SPEED_LENGHT, MEM_PACKET(usb, 3));
 
-	uhci_make_td(usb, 6, MEM_TD(usb, 7), STS_LOW_SPEED, PACKET_IN, CONF_ENDPOINT, DATA_TOGGLE_1, ZERO_DEVICE, LOW_SPEED_LENGHT, MEM_PACKET(usb, 7));
-	uhci_make_td(usb, 7, MEM_TD(usb, 8), STS_LOW_SPEED, PACKET_DATA1, CONF_ENDPOINT, DATA_TOGGLE_1, ZERO_DEVICE, LOW_SPEED_LENGHT, MEM_PACKET(usb, 7));
+	uhci_make_td(usb, 3, MEM_TD(usb, 4), PACKET_IN, CONF_ENDPOINT, DATA_TOGGLE_0, ZERO_DEVICE, LOW_SPEED_LENGHT, MEM_PACKET(usb, 5));
 
-	uhci_make_td(usb, 8, MEM_TD(usb, 9), STS_LOW_SPEED, PACKET_IN, CONF_ENDPOINT, DATA_TOGGLE_0, ZERO_DEVICE, LOW_SPEED_LENGHT, MEM_PACKET(usb, 9));
-	uhci_make_td(usb, 9, MEM_TD(usb, 10), STS_LOW_SPEED, PACKET_DATA0, CONF_ENDPOINT, DATA_TOGGLE_0, ZERO_DEVICE, LOW_SPEED_LENGHT, MEM_PACKET(usb, 9));
+	uhci_make_td(usb, 4, MEM_TD(usb, 5), PACKET_IN, CONF_ENDPOINT, DATA_TOGGLE_1, ZERO_DEVICE, LOW_SPEED_LENGHT, MEM_PACKET(usb, 7));
 
-	uhci_make_td(usb, 10, MEM_TD(usb, 11), STS_LOW_SPEED, PACKET_IN, CONF_ENDPOINT, DATA_TOGGLE_1, ZERO_DEVICE, LOW_SPEED_LENGHT, MEM_PACKET(usb, 11));
-	uhci_make_td(usb, 11, MEM_TD(usb, 12), STS_LOW_SPEED, PACKET_DATA1, CONF_ENDPOINT, DATA_TOGGLE_1, ZERO_DEVICE, LOW_SPEED_LENGHT, MEM_PACKET(usb, 11));
+	uhci_make_td(usb, 5, MEM_TD(usb, 6), PACKET_IN, CONF_ENDPOINT, DATA_TOGGLE_0, ZERO_DEVICE, LOW_SPEED_LENGHT, MEM_PACKET(usb, 9));
 
-	uhci_make_td(usb, 12, MEM_TD(usb, 13), STS_LOW_SPEED, PACKET_OUT, CONF_ENDPOINT, DATA_TOGGLE_1, ZERO_DEVICE, 0xFFF, MEM_PACKET(usb, 13));
-	uhci_make_td(usb, 13, END_TD, STS_LOW_SPEED, PACKET_DATA1, CONF_ENDPOINT, DATA_TOGGLE_1, ZERO_DEVICE, 0xFFF, MEM_PACKET(usb, 13));
+	uhci_make_td(usb, 6, MEM_TD(usb, 7), PACKET_IN, CONF_ENDPOINT, DATA_TOGGLE_1, ZERO_DEVICE, LOW_SPEED_LENGHT, MEM_PACKET(usb, 11));
+
+	uhci_make_td(usb, 7, END_TD, PACKET_OUT, CONF_ENDPOINT, DATA_TOGGLE_1, ZERO_DEVICE, LOW_SPEED_LENGHT, MEM_PACKET(usb, 11));
 
 	write_uhci_frame_num(usb, 1);
-	uhci_run(usb);
 
-	uhci_pool(usb, 13);
-	uhci_pool(usb, 13);
-	uhci_pool(usb, 13);
+	uhci_run(usb);
+	uhci_pool(usb, 7);
+	uhci_stop(usb);
+
+	for(int i=0; i<3; i++) {
+		uhci_write_td(usb, i);
+	}
 
 	for(int i=3; i<13; i++) {
 		ph(uhci_packet[usb][i]);
@@ -418,74 +401,29 @@ void uhci_packet_get_configuration(uint32_t usb) {
 void uhci_packet_in(uint32_t usb) {
 	uhci_stop(usb);
 
-	uhci_frame_mem[usb][2]=MEM_TD(usb, 14);
+	uhci_frame_mem[usb][2]=MEM_TD(usb, 10);
 
-	if(usb_ports[usb].speed==LOW_SPEED) {
-
-	uhci_make_td(usb, 14, MEM_TD(usb, 15), STS_LOW_SPEED, PACKET_IN, 1, DATA_TOGGLE_0, usb_ports[usb].interface, LOW_SPEED_LENGHT, MEM_PACKET(usb, 20));
 	if(uhci_in_data==0) {
-		uhci_make_td(usb, 15, END_TD, STS_LOW_SPEED, PACKET_DATA0, 1, DATA_TOGGLE_0, usb_ports[usb].interface, LOW_SPEED_LENGHT, MEM_PACKET(usb, 22));
+		uhci_make_td(usb, 10, END_TD, PACKET_IN, 3, DATA_TOGGLE_0, 0, LOW_SPEED_LENGHT, MEM_PACKET(usb, 20));
 		uhci_in_data=1;
 	}
 	else {
-		uhci_make_td(usb, 15, END_TD, STS_LOW_SPEED, PACKET_DATA1, 1, DATA_TOGGLE_1, usb_ports[usb].interface, LOW_SPEED_LENGHT, MEM_PACKET(usb, 22));
+		uhci_make_td(usb, 10, END_TD, PACKET_IN, 3, DATA_TOGGLE_1, 0, LOW_SPEED_LENGHT, MEM_PACKET(usb, 20));
 		uhci_in_data=0;
 	}
 
-	}
-
-	if(usb_ports[usb].speed==FULL_SPEED) {
-
-	}
-
 	write_uhci_frame_num(usb, 2);
-	uhci_run(usb);
 
-	uhci_pool(usb, 15);
+	uhci_run(usb);
+	uhci_pool(usb, 10);
+	uhci_stop(usb);
+
+	uhci_write_td(usb, 10);
 
 	uhci_frame_mem[usb][2]=0;
 }
 
-void uhci_packet_out(uint32_t usb) {
-	uhci_stop(usb);
-
-	uhci_frame_mem[usb][3]=MEM_TD(usb, 20);
-
-	if(usb_ports[usb].speed==LOW_SPEED) {
-
-	uhci_make_td(usb, 20, MEM_TD(usb, 21), STS_LOW_SPEED, PACKET_IN, 1, DATA_TOGGLE_0, usb_ports[usb].interface, LOW_SPEED_LENGHT, MEM_PACKET(usb, 30));
-	if(uhci_out_data==0) {
-		uhci_make_td(usb, 21, END_TD, STS_LOW_SPEED, PACKET_DATA0, 1, DATA_TOGGLE_0, usb_ports[usb].interface, LOW_SPEED_LENGHT, MEM_PACKET(usb, 32));
-		uhci_out_data=1;
-	}
-	else {
-		uhci_make_td(usb, 21, END_TD, STS_LOW_SPEED, PACKET_DATA1, 1, DATA_TOGGLE_1, usb_ports[usb].interface, LOW_SPEED_LENGHT, MEM_PACKET(usb, 32));
-		uhci_out_data=0;
-	}
-
-	}
-
-	if(usb_ports[usb].speed==FULL_SPEED) {
-
-	}
-
-	write_uhci_frame_num(usb, 3);
-	uhci_run(usb);
-
-	uhci_pool(usb, 21);
-
-	uhci_write_td(usb, 20);
-	uhci_write_td(usb, 21);
-
-	p("MEM:");
-	ph(uhci_packet[usb][30]);
-	ph(uhci_packet[usb][31]);
-	ph(uhci_packet[usb][32]);
-	ph(uhci_packet[usb][33]);
-
-	uhci_frame_mem[usb][3]=0;
-}
-
 void uhci_irq(void) {
 	p("UHCI IRQ");
+	uhci_clear_irq(0);
 }
