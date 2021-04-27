@@ -1,2 +1,2 @@
 # CelerOS
-Operation system in protected mode(32 bit) and legacy boot
+Halted now, I now write all code in assembly so I created another system BleskOS https://github.com/Klaykap/BleskOS
